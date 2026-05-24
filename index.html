@@ -1,0 +1,410 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <title>투사체 난투 게임 (완전 재작성 버전)</title>
+    <style>
+        /* 기본 화면 레이아웃 설정 */
+        body {
+            margin: 0;
+            background-color: #222;
+            color: white;
+            font-family: sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            overflow: hidden;
+        }
+
+        /* 스코어 UI 영역 */
+        #ui {
+            display: flex;
+            gap: 40px;
+            margin-bottom: 15px;
+            font-size: 20px;
+            font-weight: bold;
+            visibility: hidden; /* 게임 시작하면 스크립트로 보여줌 */
+        }
+        .score-box { padding: 5px 15px; border-radius: 5px; }
+        #p1-ui { background-color: #ff4d4d; color: black; }
+        #p2-ui { background-color: #4da6ff; color: black; }
+        #p3-ui { background-color: #5cd65c; color: black; display: none; }
+
+        /* 게임 보드 래퍼 */
+        #game-wrapper {
+            position: relative;
+            width: 1000px;
+            height: 600px;
+        }
+
+        /* 캔버스 화면 */
+        canvas {
+            border: 4px solid #fff;
+            background-color: #111;
+            box-shadow: 0 0 20px rgba(255,255,255,0.2);
+            position: absolute;
+            top: 0;
+            left: 0;
+            z-index: 1;
+        }
+
+        /* 시작 메뉴 창 (가장 위에 확실하게 올림) */
+        #menu {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 1000px;
+            height: 600px;
+            background-color: rgba(15, 15, 15, 0.95);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            border: 4px solid #fff;
+            box-sizing: border-box;
+            z-index: 999; /* 무조건 맨 앞 */
+        }
+        h1 { font-size: 42px; margin-bottom: 10px; }
+        p { font-size: 18px; color: #ccc; margin-bottom: 30px; }
+        
+        /* 버튼 스타일 */
+        .menu-btn {
+            font-size: 22px;
+            padding: 15px 40px;
+            margin: 0 15px;
+            cursor: pointer;
+            background-color: #444;
+            color: white;
+            border: 2px solid white;
+            border-radius: 8px;
+            transition: 0.2s;
+        }
+        .menu-btn:hover {
+            background-color: white;
+            color: black;
+        }
+
+        /* 엔딩 메시지 */
+        #msg { 
+            position: absolute; 
+            font-size: 45px; 
+            font-weight: bold; 
+            color: yellow; 
+            text-shadow: 3px 3px 5px #000; 
+            pointer-events: none; 
+            text-align: center; 
+            width: 100%; 
+            top: 45%; 
+            z-index: 5;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="ui">
+        <div id="p1-ui" class="score-box">P1 (Red): <span id="p1-life">3</span></div>
+        <div id="p2-ui" class="score-box">P2 (Blue): <span id="p2-life">3</span></div>
+        <div id="p3-ui" class="score-box">P3 (Green): <span id="p3-life">3</span></div>
+    </div>
+
+    <div id="game-wrapper">
+        <div id="menu">
+            <h1>🎮 투사체 난투 게임</h1>
+            <p>플레이 인원수를 선택하면 게임 화면과 벽이 무작위로 생성됩니다.</p>
+            <div>
+                <button class="menu-btn" onclick="startGame(2)">2인 플레이</button>
+                <button class="menu-btn" onclick="startGame(3)">3인 플레이</button>
+            </div>
+        </div>
+
+        <canvas id="gameCanvas" width="1000" height="600"></canvas>
+        <div id="msg"></div>
+    </div>
+
+<script>
+const canvas = document.getElementById("gameCanvas");
+const ctx = canvas.getContext("2d");
+const msgDiv = document.getElementById("msg");
+const menuDiv = document.getElementById("menu");
+const uiDiv = document.getElementById("ui");
+
+// 키보드 입력 관리
+const keys = {};
+window.addEventListener("keydown", (e) => { 
+    keys[e.code] = true; 
+    if(["Space", "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(e.code)) e.preventDefault();
+});
+window.addEventListener("keyup", (e) => { keys[e.code] = false; });
+
+const speed = 4;
+const bulletSpeed = 7;
+const maxLives = 3;
+
+let players = [];
+let bullets = [];
+let walls = [];
+let gameOver = false;
+let gameStarted = false;
+let playerCount = 2;
+
+// 플레이어 설계도
+class Player {
+    constructor(id, x, y, color, controls) {
+        this.id = id;
+        this.x = x;
+        this.y = y;
+        this.size = 25;
+        this.color = color;
+        this.controls = controls;
+        this.lives = maxLives;
+        this.lastDir = { x: 1, y: 0 };
+        this.canShoot = true;
+        this.cooldown = 400;
+    }
+
+    update() {
+        if (this.lives <= 0) return;
+
+        let moveX = 0;
+        let moveY = 0;
+
+        if (keys[this.controls.up]) moveY = -1;
+        if (keys[this.controls.down]) moveY = 1;
+        if (keys[this.controls.left]) moveX = -1;
+        if (keys[this.controls.right]) moveX = 1;
+
+        if (moveX !== 0 && moveY !== 0) {
+            moveX *= 0.7071;
+            moveY *= 0.7071;
+        }
+
+        // X축 벽 충돌 체크
+        const originalX = this.x;
+        this.x += moveX * speed;
+        this.x = Math.max(0, Math.min(canvas.width - this.size, this.x));
+        if (checkPlayerWallCollision(this)) this.x = originalX;
+
+        // Y축 벽 충돌 체크
+        const originalY = this.y;
+        this.y += moveY * speed;
+        this.y = Math.max(0, Math.min(canvas.height - this.size, this.y));
+        if (checkPlayerWallCollision(this)) this.y = originalY;
+
+        if (moveX !== 0 || moveY !== 0) {
+            this.lastDir = { x: moveX, y: moveY };
+        }
+
+        if (keys[this.controls.shoot] && this.canShoot) {
+            bullets.push(new Bullet(this.x + this.size/2, this.y + this.size/2, this.lastDir, this.id, this.color));
+            this.canShoot = false;
+            setTimeout(() => { this.canShoot = true; }, this.cooldown);
+        }
+    }
+
+    draw() {
+        if (this.lives <= 0) return;
+        ctx.fillStyle = this.color;
+        ctx.fillRect(this.x, this.y, this.size, this.size);
+        
+        ctx.fillStyle = "white";
+        const centerX = this.x + this.size / 2;
+        const centerY = this.y + this.size / 2;
+        ctx.beginPath();
+        ctx.arc(centerX + this.lastDir.x * 8, centerY + this.lastDir.y * 8, 4, 0, Math.PI * 2);
+        ctx.fill();
+    }
+}
+
+// 투사체 설계도
+class Bullet {
+    constructor(x, y, dir, ownerId, color) {
+        this.x = x;
+        this.y = y;
+        this.radius = 6;
+        const len = Math.sqrt(dir.x * dir.x + dir.y * dir.y);
+        this.dx = (dir.x / len) * bulletSpeed;
+        this.dy = (dir.y / len) * bulletSpeed;
+        this.ownerId = ownerId;
+        this.color = color;
+    }
+
+    update() {
+        this.x += this.dx;
+        this.y += this.dy;
+    }
+
+    draw() {
+        ctx.fillStyle = this.color;
+        ctx.beginPath();
+        ctx.arc(this.x, this.y, this.radius, 0, Math.PI * 2);
+        ctx.fill();
+    }
+
+    isOutOfBounds() {
+        return this.x < 0 || this.x > canvas.width || this.y < 0 || this.y > canvas.height;
+    }
+}
+
+// 무작위 장애물 벽 생성
+function generateWalls() {
+    walls = [];
+    const wallCount = Math.floor(Math.random() * 10) + 15; // 15~24개 생성
+    
+    // 시작 시 플레이어가 갇히거나 죽지 않는 안전 구역 설정
+    const safeZones = [
+        {x: 50, y: 250, w: 120, h: 120},  // P1 구역
+        {x: 830, y: 250, w: 120, h: 120}, // P2 구역
+        {x: 430, y: 50, w: 140, h: 120}   // P3 구역
+    ];
+
+    for (let i = 0; i < wallCount; i++) {
+        let width = Math.floor(Math.random() * 80) + 40;
+        let height = Math.floor(Math.random() * 80) + 40;
+        let x = Math.floor(Math.random() * (canvas.width - width - 100)) + 50;
+        let y = Math.floor(Math.random() * (canvas.height - height - 100)) + 50;
+
+        let wall = { x, y, width, height };
+
+        let inSafeZone = false;
+        for (let zone of safeZones) {
+            if (x < zone.x + zone.w && x + width > zone.x && y < zone.y + zone.h && y + height > zone.y) {
+                inSafeZone = true;
+                break;
+            }
+        }
+
+        if (!inSafeZone) {
+            walls.push(wall);
+        } else {
+            i--; // 안전 구역에 겹치면 패스하고 다시 연산
+        }
+    }
+}
+
+function drawWalls() {
+    ctx.fillStyle = "#555";
+    ctx.strokeStyle = "#888";
+    ctx.lineWidth = 2;
+    walls.forEach(w => {
+        ctx.fillRect(w.x, w.y, w.width, w.height);
+        ctx.strokeRect(w.x, w.y, w.width, w.height);
+    });
+}
+
+function checkPlayerWallCollision(player) {
+    for (let w of walls) {
+        if (player.x < w.x + w.width && player.x + player.size > w.x &&
+            player.y < w.y + w.height && player.y + player.size > w.y) {
+            return true;
+        }
+    }
+    return false;
+}
+
+function checkCircleRectCollision(circle, rect) {
+    let closestX = Math.max(rect.x, Math.min(circle.x, rect.x + (rect.size || rect.width)));
+    let closestY = Math.max(rect.y, Math.min(circle.y, rect.y + (rect.size || rect.height)));
+    let distanceX = circle.x - closestX;
+    let distanceY = circle.y - closestY;
+    return (distanceX * distanceX + distanceY * distanceY) < (circle.radius * circle.radius);
+}
+
+// 📌 핵심 버튼 트리거 함수
+function startGame(count) {
+    playerCount = count;
+    
+    // UI 표시 전환
+    menuDiv.style.display = "none";
+    uiDiv.style.visibility = "visible";
+    
+    // 인원수에 맞게 데이터 할당
+    players = [
+        new Player(1, 100, 300, "#ff4d4d", { up: "KeyW", down: "KeyS", left: "KeyA", right: "KeyD", shoot: "Space" }),
+        new Player(2, 880, 300, "#4da6ff", { up: "ArrowUp", down: "ArrowDown", left: "ArrowLeft", right: "ArrowRight", shoot: "Enter" })
+    ];
+
+    if (playerCount === 3) {
+        players.push(new Player(3, 490, 100, "#5cd65c", { up: "KeyI", down: "KeyK", left: "KeyJ", right: "KeyL", shoot: "KeyO" }));
+        document.getElementById("p3-ui").style.display = "block";
+    } else {
+        document.getElementById("p3-ui").style.display = "none";
+    }
+
+    generateWalls();
+    updateUI();
+    gameStarted = true;
+}
+
+function updateUI() {
+    document.getElementById("p1-life").innerText = players[0] ? players[0].lives : 0;
+    document.getElementById("p2-life").innerText = players[1] ? players[1].lives : 0;
+    if(playerCount === 3 && players[2]) {
+        document.getElementById("p3-life").innerText = players[2].lives;
+    }
+}
+
+// 무한 루프 게임 사이클
+function gameLoop() {
+    // 매 프레임마다 화면 초기화 및 지우기
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    if (gameStarted) {
+        drawWalls();
+
+        if (!gameOver) {
+            players.forEach(p => { p.update(); p.draw(); });
+
+            for (let i = bullets.length - 1; i >= 0; i--) {
+                let b = bullets[i];
+                b.update();
+                b.draw();
+
+                if (b.isOutOfBounds()) {
+                    bullets.splice(i, 1);
+                    continue;
+                }
+
+                let hitWall = false;
+                for (let w of walls) {
+                    if (checkCircleRectCollision(b, w)) {
+                        bullets.splice(i, 1);
+                        hitWall = true;
+                        break;
+                    }
+                }
+                if (hitWall) continue;
+
+                for (let p of players) {
+                    if (p.lives > 0 && b.ownerId !== p.id && checkCircleRectCollision(b, p)) {
+                        p.lives--;
+                        updateUI();
+                        bullets.splice(i, 1);
+                        break;
+                    }
+                }
+            }
+
+            const alivePlayers = players.filter(p => p.lives > 0);
+            if (alivePlayers.length <= 1) {
+                gameOver = true;
+                if (alivePlayers.length === 1) {
+                    msgDiv.innerText = `Player ${alivePlayers[0].id} 승리! (F5를 눌러 재경기)`;
+                } else {
+                    msgDiv.innerText = "무승부! (F5를 눌러 재경기)";
+                }
+            }
+        } else {
+            players.forEach(p => p.draw());
+        }
+    }
+
+    requestAnimationFrame(gameLoop);
+}
+
+// 게임 구동 시작
+gameLoop();
+</script>
+</body>
+</html>
